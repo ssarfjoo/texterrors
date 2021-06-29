@@ -6,8 +6,9 @@ import numpy as np
 import plac
 from loguru import logger
 from termcolor import colored
-import shutil
-from dataclasses import dataclass
+import re
+from sklearn.metrics import confusion_matrix, multilabel_confusion_matrix
+import os
 
 
 def convert_to_int(lst_a, lst_b, dct):
@@ -204,7 +205,9 @@ def get_oov_cer(ref_aligned, hyp_aligned, oov_set):
     return oov_count_error, oov_count_denom
 
 
-def read_files(ref_f, hyp_f, isark):
+def read_files(ref_f, hyp_f, isark, rm_events=True):
+    rm_list = ['<unk>', '<eps>', '<noise>', '<silence>', '<sil>', '<babble>', '<inaudible>', '<hes>', '<non-speech>']
+
     utt_to_text_ref = {}
     utts = []
     with open(ref_f) as fh:
@@ -213,10 +216,19 @@ def read_files(ref_f, hyp_f, isark):
                 utt, *words = line.split()
                 assert utt not in utts, 'There are repeated utterances in reference file! Exiting'
                 utts.append(utt)
-                utt_to_text_ref[utt] = words
+                if rm_events:
+                    utt_to_text_ref[utt] = [w for w in words if not w in rm_list]
+                    utt_to_text_ref[utt] = re.subn(r'\[[0-9a-zA-Z/ ]+?\]', '', ' '.join(utt_to_text_ref[utt]))[0].split()
+
+                else:
+                    utt_to_text_ref[utt] = [w for w in words]
             else:
                 words = line.split()
-                utt_to_text_ref[i] = words
+                if rm_events:
+                    utt_to_text_ref[i] =  [w for w in words if not w in rm_list]
+                    utt_to_text_ref[i] = re.subn(r'\[[0-9a-zA-Z/ ]+?\]', '', ' '.join(utt_to_text_ref[i]))[0].split()
+                else:
+                    utt_to_text_ref[i] =  [w for w in words]
                 utts.append(i)
 
     utt_to_text_hyp = {}
@@ -224,10 +236,18 @@ def read_files(ref_f, hyp_f, isark):
         for i, line in enumerate(fh):
             if isark:
                 utt, *words = line.split()
-                utt_to_text_hyp[utt] = [w for w in words if w != '<unk>']
+                if rm_events:
+                    utt_to_text_hyp[utt] =  [w for w in words if not w in rm_list]
+                    utt_to_text_hyp[utt] = re.subn(r'\[[0-9a-zA-Z/ ]+?\]', '', ' '.join(utt_to_text_hyp[utt]))[0].split()
+                else:
+                    utt_to_text_hyp[utt] =  [w for w in words]
             else:
                 words = line.split()
-                utt_to_text_hyp[i] = [w for w in words if w != '<unk>']
+                if rm_events:
+                    utt_to_text_hyp[i] =  [w for w in words if not w in rm_list]
+                    utt_to_text_hyp[i] = re.subn(r'\[[0-9a-zA-Z/ ]+?\]', '', ' '.join(utt_to_text_hyp[i]))[0].split()
+                else:
+                    utt_to_text_hyp[i] =  [w for w in words]
     return utt_to_text_ref, utt_to_text_hyp, utts
 
 
@@ -248,74 +268,93 @@ def read_ctm_files(ref_f, hyp_f):
     utts = list(utt_to_ref.keys())
     return utt_to_ref, utt_to_hyp, utts
 
-@dataclass
-class LineElement:
-    upper_word: str
-    length: int
-    lower_word: str
-    length_lower: int
-    has_color: bool
-
-
-class DoubleLine:
-    def __init__(self, terminal_width):
-        self.line_elements = []
-        self.terminal_width = terminal_width
-
-    def add_lineelement(self, upper_word, length, lower_word, lower_length, has_color):
-        le = LineElement(upper_word, length, lower_word, lower_length, has_color)
-        self.line_elements.append(le)
-
-    @staticmethod
-    def construct(upper_line, lower_line):
-        upper_line_str = ' '.join(upper_line)
-        lower_line_str = ' '.join(lower_line)
-        return upper_line_str, lower_line_str
-
-    def iter_construct(self):
-        index = 0
-        upper_line = []
-        lower_line = []
-        written_len = 0
-        while index < len(self.line_elements):
-            le = self.line_elements[index]
-            length_lower = le.length_lower
-            padded_len = max(le.length, length_lower)
-            if written_len + padded_len > self.terminal_width:
-                upper_line_str, lower_line_str = self.construct(upper_line, lower_line)
-                upper_line, lower_line = [], []
-                yield upper_line_str, lower_line_str
-                written_len = 0
-            upper_word = le.upper_word
-            written_len += padded_len + 1
-            pad_len_plus_color = padded_len + 9 if le.has_color else 0
-            upper_line.append(f'{upper_word:^{pad_len_plus_color}}')
-            if length_lower != -1:
-                lower_line.append(f'{le.lower_word:^{pad_len_plus_color}}')
-            else:
-                lower_line.append(f'{le.lower_word:^{padded_len}}')
-            index += 1
-        upper_line, lower_line = self.construct(upper_line, lower_line)
-        yield upper_line, lower_line
-
 
 def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=False,
-                  use_chardiff=True, isark=False, skip_detailed=False, insert_tok='<eps>', keywords_list_f='',
-                  not_score_end=False, freq_sort=False, phrase_f='', isctm=False, utt_group_map_f=''):
-    is_above_three_six = sys.version_info[1] >= 7
-    terminal_width, _ = shutil.get_terminal_size()
-    if not isctm:
-        utt_to_text_ref, utt_to_text_hyp, utts = read_files(ref_f, hyp_f, isark)
-    else:
-        utt_to_text_ref, utt_to_text_hyp, utts = read_ctm_files(ref_f, hyp_f)
+                  use_chardiff=True, isark=False, skip_detailed=False, insert_tok='<eps>', keywords_list_f='', group_keywords_list_f='',
+                  not_score_end=False, no_freq_sort=False, phrase_f='', phrase_list_f='', isctm=False, utt_group_map_f='',class_list=''):
+
 
     keywords = set()
+    group_keywords={}
     if keywords_list_f:
         for line in open(keywords_list_f):
             assert len(line.split()) == 1, 'A keyword must be a single word!'
             keywords.add(line.strip())
+    elif group_keywords_list_f:
+        for line in open(group_keywords_list_f):
+            assert len(line.split()) == 2, 'Each keyword line must be in <group-name> <word-name> format!'
+            line_parts= line.strip().split()
+            if not line_parts[0] in group_keywords:
+                group_keywords[line_parts[0]] = set()
+            group_keywords[line_parts[0]].add(line_parts[1])
+    
+    rm_events=True
+    if keywords or group_keywords:
+        rm_events=False
+
+    w2c_dic={}
+    c2w_dic={}
+    if class_list:
+        for line in open(class_list):
+            line_parts = line.strip().split()
+            assert len(line_parts) > 1, 'Format of class_list file is not correct!'
+            w2c_dic[' '.join(line_parts[1:])] = line_parts[0]
+            if not line_parts[0] in c2w_dic:
+                c2w_dic[line_parts[0]] = list()
+            c2w_dic[line_parts[0]].append(' '.join(line_parts[1:]))
+
+    if not isctm:
+        utt_to_text_ref, utt_to_text_hyp, utts = read_files(ref_f, hyp_f, isark, rm_events)
+    else:
+        utt_to_text_ref, utt_to_text_hyp, utts = read_ctm_files(ref_f, hyp_f)
+    
+    if w2c_dic:
+        for utt in utts:
+            for ref_hyp in [utt_to_text_ref,utt_to_text_hyp]:
+                words = ref_hyp[utt]
+                end_idx = len(words)-3
+                j=0
+                while j < end_idx: 
+                    if words[j]+' '+words[j+1]+' '+words[j+2]+' '+words[j+3] in w2c_dic:
+                        words[j]=w2c_dic[words[j]+' '+words[j+1]+' '+words[j+2]+' '+words[j+3]]
+                        del words[j+1]
+                        del words[j+1]
+                        del words[j+1]
+                        end_idx-=3
+                    j+=1
+
+                end_idx = len(words)-2
+                j=0
+                while j < end_idx: 
+                    if words[j]+' '+words[j+1]+' '+words[j+2] in w2c_dic:
+                        words[j]=w2c_dic[words[j]+' '+words[j+1]+' '+words[j+2]]
+                        del words[j+1]
+                        del words[j+1]
+                        end_idx-=2
+                    j+=1
+                end_idx = len(words)-1
+                j=0
+
+                while j < end_idx: 
+                    if words[j]+' '+words[j+1] in w2c_dic:
+                        words[j]=w2c_dic[words[j]+' '+words[j+1]]
+                        del words[j+1]
+                        end_idx-=1
+                    j+=1
+                for j in range(len(words)):
+                    if words[j] in w2c_dic:
+                        words[j]=w2c_dic[words[j]]
+                    elif not words[j] in c2w_dic:
+                        words[j]='NO_CLASS'
+                ref_hyp[utt] = words
+
+                                             
+       
 
     utt2phrase = {}
+    utt2phrase_list={}
+    
+
     if phrase_f:
         for line in open(phrase_f):
             utt_words = line.split()
@@ -323,6 +362,18 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
                 utt2phrase[utt_words[0]] = utt_words[1:]
             else:
                 utt2phrase[utt_words[0]] = []
+    if phrase_list_f:
+        phrase_stats={}
+        for line in open(phrase_list_f):
+            ph_list=line.strip().split('\t')
+            assert len(ph_list[0].split()) == 1, 'Format of phrase_list_f file is not correct! Expected <utt><tab><entity1_tag><space><entity1_words><tab><entity2_tag><space><entity2_words>...'
+            utt2phrase_list[ph_list[0]] = []
+            if len(ph_list) > 1:
+                for k in range(1,len(ph_list)):
+                    words=ph_list[k].split()
+                    utt2phrase_list[ph_list[0]].append((words[0], words[1:]))
+
+
 
     if utt_group_map_f:
         utt_group_map = {}
@@ -334,11 +385,13 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
             group_stats[group] = {}
             group_stats[group]['count'] = 0
             group_stats[group]['errors'] = 0
+            group_stats[group]['utt'] = 0
+            group_stats[group]['serr'] = 0
 
     if outf:
         fh = open(outf, 'w')
     else:
-        fh = sys.stdout
+        import sys; fh = sys.stdout
 
     # Done reading input, processing.
     oov_count_denom = 0
@@ -352,6 +405,11 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
     subs = defaultdict(int)
     total_count = 0
     word_counts = defaultdict(int)
+    c_mat=np.zeros((len(c2w_dic.keys())+1,len(c2w_dic.keys())+1))
+    c_mat_dic={}
+    for cl in c2w_dic.keys():
+        c_mat_dic[cl] = np.zeros((2,2))
+
     if not skip_detailed:
         fh.write('Per utt details:\n')
     dct_char = {insert_tok: 0, 0: insert_tok}
@@ -366,13 +424,30 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
                 logger.warning(f'A phrase ({phrase}) does not exist in the reference (uttid: {utt})! The phrase'
                                f' must be contained in the reference text! Will not score.')
                 continue
-        if keywords:
-            ref = [w for w in ref if w in keywords]
-            if not len(ref):  # skip utterance is contains no keywords
+        if utt2phrase_list:
+            phrase_list = utt2phrase_list.get(utt)
+            if not phrase_list:
+                continue
+            is_contained_all=True
+            for phr_key, phr_words in phrase_list:
+                is_contained = any([ref[i: i + len(phr_words)] == phr_words for i in range(len(ref)-len(phr_words) + 1)])
+                if not is_contained:
+                    logger.warning(f'A phrase ({phr_words}) does not exist in the reference (uttid: {utt})! The phrase'
+                                f' must be contained in the reference text! Will not score.')
+                    is_contained_all=False
+                    break
+            if not is_contained_all:
                 continue
         hyp = utt_to_text_hyp.get(utt)
+
+
+        
         if hyp is None:
             logger.warning(f'Missing hypothesis for utterance: {utt}')
+            #continue
+            hyp = ["empty_string"]
+
+        if len(ref) == 0:
             continue
 
         if not isctm:
@@ -418,44 +493,183 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
 
             ref_aligned = ref_aligned[start_idx: start_idx + ref_offset]
             hyp_aligned = hyp_aligned[start_idx: start_idx + ref_offset]
+
+        entity_ref_hyp_aligned=[]
+        if utt2phrase_list:
+            phrase_list = utt2phrase_list[utt]
+            if not phrase_list:
+                continue
+            aligned_ids=[]
+            start_idx = 0
+
+            for phr_key, phr_words in phrase_list:
+                word_idx = 0
+                ref_offset = 1
+
+                while start_idx < len(ref_aligned):
+                    if phr_words[word_idx] == ref_aligned[start_idx]:
+                        found = True
+                        for i in range(1, len(phr_words)):
+                            while ref_aligned[start_idx + ref_offset] == '<eps>':
+                                ref_offset += 1
+                            if phr_words[word_idx + i] != ref_aligned[start_idx + ref_offset]:
+                                found = False
+                                ref_offset = 1
+                                break
+                            ref_offset += 1
+                        if found:
+                            break
+                    start_idx += 1
+                    word_idx = 0
+                tmp_idx=[id for id in range(start_idx, start_idx + ref_offset)]
+                phrase_ref=[ref_aligned[id] for id in tmp_idx]
+                phrase_hyp=[hyp_aligned[id] for id in tmp_idx]
+
+                entity_ref_hyp_aligned.append((phr_key, phrase_ref, phrase_hyp))
+                aligned_ids += tmp_idx
+            
+            ref_aligned = [ref_aligned[id] for id in aligned_ids]
+            hyp_aligned = [hyp_aligned[id] for id in aligned_ids]
+
+
+        if w2c_dic:
+            j=0
+            end_idx=len(ref_aligned)
+            while j < end_idx: 
+                if ref_aligned[j] == '<eps>':
+                    if hyp_aligned[j] in c2w_dic.keys():
+                        ref_aligned[j]='NO_CLASS'
+                    else:
+                        del ref_aligned[j]
+                        del hyp_aligned[j]
+                        end_idx-=1
+                        j-=1
+                elif hyp_aligned[j] == '<eps>':
+                    if ref_aligned[j] in c2w_dic.keys():
+                        hyp_aligned[j]='NO_CLASS'
+                    else:
+                        del ref_aligned[j]
+                        del hyp_aligned[j]
+                        end_idx-=1
+                        j-=1                        
+
+                j+=1
+            if len(ref_aligned) == 0:
+                continue
+            c_labels=[cl for cl in c2w_dic.keys()]
+            c_labels_nc= c_labels + ['NO_CLASS']
+            utt_cmat = confusion_matrix(ref_aligned, hyp_aligned, labels=c_labels_nc)
+            c_mat+=utt_cmat
+
+            utt_cb_cmat = multilabel_confusion_matrix(ref_aligned, hyp_aligned,  labels=c_labels_nc)
+            for i in range(len(c_labels_nc)-1):
+                c_mat_dic[c_labels_nc[i]]+=utt_cb_cmat[i]
+
+        if  group_keywords and utt_group_map_f:
+            keywords=group_keywords[utt_group_map[utt]]
+
+        if keywords:
+            aligned_ids=[]
+            start_idx = 0
+            ref_offset=1
+            while start_idx < len(ref_aligned):
+                if ref_aligned[start_idx] in keywords:
+                    aligned_ids.append(start_idx)
+                    temp_idx=[]
+                    while start_idx + ref_offset < len(ref_aligned)  and ref_aligned[start_idx + ref_offset] == '<eps>':
+                        temp_idx.append(start_idx + ref_offset)
+                        ref_offset += 1
+                        
+                    if start_idx + ref_offset != len(ref_aligned) and not ref_aligned[start_idx + ref_offset] in keywords:
+                        temp_idx=[]
+                    else:
+                        for id in temp_idx:
+                            aligned_ids.append(int(id))
+                    start_idx+= ref_offset
+                    ref_offset = 1
+                    continue
+                start_idx+=1
+            if len(aligned_ids) > 0:
+                temp_idx=[]
+                add_initial=True
+                for j in range(aligned_ids[0]):
+                    if ref_aligned[j] != '<eps>' and not ref_aligned[j] in keywords:
+                        add_initial==False
+                        break
+                    temp_idx.append(j)
+                if add_initial:
+                    aligned_ids = temp_idx + aligned_ids
+                aligned_ids = [int(id) for id in aligned_ids]
+                ref_aligned = [ref_aligned[id] for id in aligned_ids]
+                hyp_aligned = [hyp_aligned[id] for id in aligned_ids]
+            else:  # skip utterance that contains no keywords
+                continue
         colored_output = []
         error_count = 0
         ref_word_count = 0
-        double_line = DoubleLine(terminal_width)
         for i, (ref_w, hyp_w,) in enumerate(zip(ref_aligned, hyp_aligned)):  # Counting errors
             if not_score_end and i > last_good_index:
                 break
             if ref_w == hyp_w:
-                double_line.add_lineelement(ref_w, len(ref_w), '', -1, False)
+                colored_output.append(ref_w)
                 word_counts[ref_w] += 1
                 ref_word_count += 1
             else:
                 error_count += 1
                 if ref_w == '<eps>':
-                    double_line.add_lineelement(colored(hyp_w, 'green'), len(hyp_w), '', -1, True)
+                    colored_output.append(colored(hyp_w, 'green'))
                     ins[hyp_w] += 1
                 elif hyp_w == '<eps>':
-                    double_line.add_lineelement(colored(ref_w, 'red'), len(ref_w), '', -1, True)
+                    colored_output.append(colored(ref_w, 'red'))
                     ref_word_count += 1
                     dels[ref_w] += 1
                     word_counts[ref_w] += 1
                 else:
                     ref_word_count += 1
-                    key = f'{ref_w}>{hyp_w}'
-                    double_line.add_lineelement(colored(ref_w, 'red'), len(ref_w),
-                                                colored(hyp_w, 'green'), len(hyp_w), True)
-                    subs[key] += 1
+                    colored_output.append(colored(f'{ref_w} > {hyp_w}', 'magenta'))
+                    subs[f'{ref_w} > {hyp_w}'] += 1
                     word_counts[ref_w] += 1
         total_count += ref_word_count
         if not skip_detailed:
-            for upper_line, lower_line in double_line.iter_construct():
-                fh.write(upper_line + '\n')
-                fh.write(lower_line + '\n')
+            for w in colored_output:
+                fh.write(f'{w} ')
+            fh.write('\n')
 
         if utt_group_map_f:
             group = utt_group_map[utt]
             group_stats[group]['count'] += ref_word_count
             group_stats[group]['errors'] += error_count
+            group_stats[group]['utt'] += 1
+            if error_count > 0:
+                group_stats[group]['serr'] += 1
+
+        if utt2phrase_list:
+            for phr_key, phrase_ref, phrase_hyp in entity_ref_hyp_aligned:
+                phrase_error_count = 0
+                phrase_ref_word_count = 0
+                for i, (ref_w, hyp_w,) in enumerate(zip(phrase_ref, phrase_hyp)):  # Counting errors
+                    if ref_w == hyp_w:
+                        phrase_ref_word_count += 1
+                    else:
+                        phrase_error_count += 1
+                        if ref_w == '<eps>':
+                            pass
+                        elif hyp_w == '<eps>':
+                            phrase_ref_word_count += 1
+                        else:
+                            phrase_ref_word_count += 1
+                if not phr_key in phrase_stats:
+                    phrase_stats[phr_key]={}
+                    phrase_stats[phr_key]['count']=0
+                    phrase_stats[phr_key]['errors']=0
+                    phrase_stats[phr_key]['utt']=0
+                    phrase_stats[phr_key]['serr']=0
+                phrase_stats[phr_key]['count'] += phrase_ref_word_count
+                phrase_stats[phr_key]['errors'] += phrase_error_count
+                phrase_stats[phr_key]['utt'] += 1
+                if phrase_error_count > 0:
+                    phrase_stats[phr_key]['serr'] += 1
+
 
         if error_count: utt_wrong += 1
 
@@ -483,6 +697,23 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
             oov_count_denom += cnt
 
     # Outputting metrics from gathered statistics.
+    if w2c_dic:
+        tot_tp=np.trace(c_mat[:-1,:-1])
+        tot_tn=c_mat[-1,-1]
+        tot_class_accuracy=1.0*(tot_tp+tot_tn)/np.sum(c_mat)
+        
+        print("Total classification accuracy %.2f \n" % (tot_class_accuracy*100) )
+    
+        for cl in c2w_dic.keys():
+            print("Stats for class " + cl + ":" + os.linesep)
+            cur_cmat=c_mat_dic[cl]
+            class_accuracy=1.0*(cur_cmat[0,0]+cur_cmat[1,1])/np.sum(cur_cmat)
+            precision=1.0*cur_cmat[1,1]/(cur_cmat[1,1]+cur_cmat[0,1])
+            recall=1.0*cur_cmat[1,1]/(cur_cmat[1,1]+cur_cmat[1,0])
+            print("Accuracy %.2f Precision: %.2f Recal: %.2f\n" % (class_accuracy*100, precision*100, recall*100)) 
+
+
+
     ins_count = sum(ins.values())
     del_count = sum(dels.values())
     sub_count = sum(subs.values())
@@ -498,10 +729,26 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
     if oov_set:
         fh.write(f'OOV CER: {100.*oov_count_error / oov_count_denom:.1f}\n')
     if utt_group_map_f:
-        fh.write('Group WERS:\n')
-        for group, stats in group_stats.items():
+        fh.write('Group WERS\tAccuracy\tPhrase length:\n')
+        sortedkeys=sorted(group_stats.keys(), key=lambda x:x.lower())
+        for group in sortedkeys:
+            stats = group_stats[group]
             wer = 100. * (stats['errors'] / float(stats['count']))
-            fh.write(f'{group}\t{wer:.1f}\n')
+            acc = 100. * (1 - stats['serr'] / float(stats['utt']))
+            phrase_length = (stats['count'] / float(stats['utt']))
+            fh.write(f'{group}\t{wer:.1f}\t{acc:.1f}\t{phrase_length:.1f}\n')
+        fh.write('\n')
+
+    if utt2phrase_list:
+        fh.write('Entity WERS\tAccuracy\tPhrase length\tNum phrase:\n')
+        sortedkeys=sorted(phrase_stats.keys(), key=lambda x:x.lower())
+        for group in sortedkeys:
+            stats = phrase_stats[group]
+            wer = 100. * (stats['errors'] / float(stats['count']))
+            acc = 100. * (1 - stats['serr'] / float(stats['utt']))
+            phrase_length = (stats['count'] / float(stats['utt']))
+            phrase_count=stats['utt']
+            fh.write(f'{group}\t{wer:.1f}\t{acc:.1f}\t{phrase_length:.1f}\t{phrase_count:d}\n')
         fh.write('\n')
 
     if not skip_detailed:
@@ -510,13 +757,13 @@ def process_files(ref_f, hyp_f, outf, cer=False, count=10, oov_set=None, debug=F
             fh.write(f'{v}\t{c}\n')
         fh.write('\n')
         fh.write(f'Deletions:\n')
-        for v, c in sorted(dels.items(), key=lambda x: (x[1] if not freq_sort else x[1] / word_counts[x[0]]),
+        for v, c in sorted(dels.items(), key=lambda x: (x[1] if no_freq_sort else x[1] / word_counts[x[0]]),
                            reverse=True)[:count]:
             fh.write(f'{v}\t{c}\t{word_counts[v]}\n')
         fh.write('\n')
         fh.write(f'Substitutions:\n')
         for v, c in sorted(subs.items(),
-                           key=lambda x: (x[1] if not freq_sort else x[1] / word_counts[x[0].split('>')[0].strip()]),
+                           key=lambda x: (x[1] if no_freq_sort else x[1] / word_counts[x[0].split('>')[0].strip()]),
                            reverse=True)[:count]:
             ref_w = v.split('>')[0].strip()
             fh.write(f'{v}\t{c}\t{word_counts[ref_w]}\n')
@@ -536,10 +783,14 @@ def main(
     no_chardiff: ("Don't use character lev distance for alignment", 'flag', None) = False,
     skip_detailed: ('No per utterance output', 'flag', 's') = False,
     phrase_f: ('Has per utterance phrase which should be scored against, instead of whole utterance', 'option', None) = '',
+    phrase_list_f: ('Has per utterance phrase list which should be scored against, instead of whole utterance', 'option', None) = '',
     keywords_list_f: ('Will filter out non keyword reference words.', 'option', None) = '',
-    freq_sort: ('Turn off sorting del/sub errors by frequency (instead by count)', 'flag', None) = False,
+    group_keywords_list_f: ('Will filter out non keyword reference words based on the group.', 'option', None) = '',
+    no_freq_sort: ('Turn off sorting del/sub errors by frequency (instead by count)', 'flag', None) = False,
     not_score_end: ('Errors at the end will not be counted', 'flag', None) = False,
     utt_group_map_f: ('Should be a file which maps uttids to group, WER will be output per group',
+        'option', '') = '',
+    class_to_word: ('List of classes with words for computing the class based accuracy',
         'option', '') = ''):
 
     oov_set = []
@@ -550,9 +801,10 @@ def main(
         oov_set = set(oov_set)
     process_files(fpath_ref, fpath_hyp, outf, cer, debug=debug, oov_set=oov_set,
                  use_chardiff=not no_chardiff, isark=isark, skip_detailed=skip_detailed,
-                 keywords_list_f=keywords_list_f, not_score_end=not_score_end,
-                 freq_sort=freq_sort, phrase_f=phrase_f, isctm=isctm,
-                 utt_group_map_f=utt_group_map_f)
+                 keywords_list_f=keywords_list_f, group_keywords_list_f=group_keywords_list_f, not_score_end=not_score_end,
+                 no_freq_sort=no_freq_sort, phrase_f=phrase_f, phrase_list_f=phrase_list_f, isctm=isctm,
+                 utt_group_map_f=utt_group_map_f,
+                 class_list=class_to_word)
 
 
 if __name__ == "__main__":

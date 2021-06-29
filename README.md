@@ -53,9 +53,15 @@ to get per speaker WER for example).
 
 `-oov-list-f` - The CER between words aligned to the OOV words will be calculated (the OOV-CER). 
 
-`-keywords-list-f` - The hypothesis is assumed to only contain keywords, the reference is filtered by them before calculating metrics like WER.
+`-keywords-list-f` - The reference is filtered by these keywords before calculating metrics like WER. In other words, score on just specific keyword list.
+
+`-group-keywords-list-f` - Similar to `-keywords-list-f`, however separated per group. Mostly used when `-utt-group-map` is defined. 
 
 `-phrase-f` - If you just want to score a phrase inside an utterance.
+
+`-phrase-list-f` - Similar to `-phrase-f`, however score multiple phrases inside an utterance
+
+`-class-to-word` - List of classes with words for computing the class based accuracy
 
 # Why is the WER slightly higher than in kaldi ?
 
