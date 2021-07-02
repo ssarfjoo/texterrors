@@ -17,7 +17,7 @@ Green is what the model output incorrectly (insertion or the hypothesis word in 
 # Installing
 Requires minimum python 3.6! And the `pybind11` package should already be installed.
 ```
-git clone --recurse-submodules git@github.com:RuABraun/texterrors.git
+git clone https://github.com/ssarfjoo/texterrors.git
 python -m pip install texterrors/
 ```
 The package will be installed as `texterrors`.
